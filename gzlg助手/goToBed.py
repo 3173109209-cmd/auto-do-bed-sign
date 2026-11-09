@@ -49,11 +49,14 @@ def _resolve_with_china_dns(hostname):
 
 
 def _custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    """自定义 getaddrinfo，对目标域名使用国内 DNS 解析"""
-    if host in TARGET_DOMAINS:
+    """优先保留当前网络的系统解析，仅在学校域名解析失败时回退。"""
+    try:
+        return _original_getaddrinfo(host, port, family, type, proto, flags)
+    except socket.gaierror:
+        if host not in TARGET_DOMAINS or family == socket.AF_INET6:
+            raise
         ip = _resolve_with_china_dns(host)
         return _original_getaddrinfo(ip, port, family, type, proto, flags)
-    return _original_getaddrinfo(host, port, family, type, proto, flags)
 
 
 # 替换系统的 DNS 解析函数
@@ -299,3 +302,4 @@ def run(max_attempts=5):
 
 if __name__ == '__main__':
     sys.exit(run())
+
