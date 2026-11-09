@@ -21,7 +21,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.diagnostics_only && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v2
@@ -34,7 +34,7 @@ jobs:
         if: ${{ inputs.diagnostics_only }}
         run: |
           echo "IPv6 default route:"
-          ip -6 route show default
+          ip -6 route show default || true
           for host in ids.gzist.edu.cn xsfw.gzist.edu.cn; do
             echo "=== $host: system DNS ==="
             getent ahosts "$host" || true
