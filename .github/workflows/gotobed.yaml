@@ -21,7 +21,7 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ inputs.diagnostics_only && 'macos-latest' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v2
@@ -35,7 +35,9 @@ jobs:
         run: |
           echo "IPv6 default route:"
           ip -6 route show default || true
+          all_hosts_ready=1
           for host in ids.gzist.edu.cn xsfw.gzist.edu.cn; do
+            host_ready=0
             echo "=== $host: system DNS ==="
             getent ahosts "$host" || true
             for resolver in 223.5.5.5 119.29.29.29; do
@@ -53,10 +55,17 @@ jobs:
               if [ "$family" = "ipv4" ]; then args=(-4); fi
               if [ "$family" = "ipv6" ]; then args=(-6); fi
               echo "=== HTTPS $family $host ==="
-              curl "${args[@]}" --noproxy '*' --connect-timeout 5 --max-time 12 --silent --show-error --output /dev/null --write-out 'http=%{http_code} remote=%{remote_ip} connect=%{time_connect} total=%{time_total}\n' "$url" || true
+              if curl "${args[@]}" --noproxy '*' --connect-timeout 5 --max-time 12 --silent --show-error --output /dev/null --write-out 'http=%{http_code} remote=%{remote_ip} connect=%{time_connect} total=%{time_total}\n' "$url"; then
+                host_ready=1
+              fi
             done
+            if [ "$host_ready" = "0" ]; then all_hosts_ready=0; fi
           done
-          echo "诊断已完成；此任务未登录、未签到、未发邮件。" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$all_hosts_ready" = "0" ]; then
+            echo "网络诊断失败：至少一个学校服务无法连接。未登录、未签到、未发邮件。" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "学校服务均可连接；仅验证网络，未验证登录或签到。" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
         if: ${{ !inputs.diagnostics_only }}
@@ -85,4 +94,5 @@ jobs:
           fi
           python -u gzlg助手/goToBed.py || { code=$?; echo "Script failed with exit code $code"; exit "$code"; }
         
+
 
