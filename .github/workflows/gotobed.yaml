@@ -86,13 +86,14 @@ jobs:
           # GitHub 定时触发可能延迟；凌晨/白天到达的旧任务不再登录和发邮件。
           if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
             local_time=$(TZ=Asia/Shanghai date +%H%M)
-            if [[ "$local_time" < "2140" ]]; then
-              echo "跳过：定时任务已延迟至北京时间 $(TZ=Asia/Shanghai date '+%F %T')，不执行查寝。"
-              echo "定时任务因延迟到非晚间时段而跳过，未执行查寝。" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$local_time" < "2140" || "$local_time" > "2259" ]]; then
+              echo "跳过：定时任务不在允许执行窗口，当前北京时间 $(TZ=Asia/Shanghai date '+%F %T')，不执行查寝。"
+              echo "定时任务不在北京时间 21:40—23:00（不含23:00）窗口，已跳过，未执行查寝。" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
           fi
           python -u gzlg助手/goToBed.py || { code=$?; echo "Script failed with exit code $code"; exit "$code"; }
         
+
 
 
