@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import base64, re, execjs, json, requests, os, sys, ddddocr, socket, time, random
 from datetime import datetime
+from urllib.parse import urlsplit
 import dns.resolver
 
 # 获取当前文件的目录
@@ -12,7 +13,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 from emailSender import send_QQ_email_plain
 
-with open('gzlg助手/g5116.js', 'r', encoding='utf-8') as f:
+with open(os.path.join(current_dir, 'g5116.js'), 'r', encoding='utf-8') as f:
     js = f.read()
 ctx = execjs.compile(js)
 
@@ -59,8 +60,25 @@ def _custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _custom_getaddrinfo
 
 
+class CheckInRejected(RuntimeError):
+    """School returned a final rejection; retrying will not fix it."""
+
+
+class SchoolSession(requests.Session):
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault('timeout', (10, 20))
+        target = urlsplit(url)
+        # Never log query strings, login payloads, cookies or tickets.
+        print(f'请求 {method.upper()} {target.hostname}{target.path}', flush=True)
+        response = super().request(method, url, **kwargs)
+        response.raise_for_status()
+        return response
+
+
 def init():
-    session = requests.Session()
+    session = SchoolSession()
+    # School traffic goes directly; TLS certificate validation stays enabled.
+    session.trust_env = False
     session.headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -112,27 +130,29 @@ def login(session):
     login_response = response.json()
     if 'NOUSER' in login_response:
         # logging.error('登录异常')
-        print("登录失败，响应内容：", login_response)
+        print("学校拒绝登录。", flush=True)
         result = '账号不存在'
         send_QQ_email_plain(result)
         sys.exit(1)
     elif 'PASSERROR' in login_response:
         # logging.error('登录异常')
-        print("登录失败，响应内容：", login_response)
+        print("学校拒绝登录。", flush=True)
         result = '密码错误'
         send_QQ_email_plain(result)
         sys.exit(1)
     elif 'CODEFALSE' in login_response:
         # logging.error('登录异常')
-        print("登录失败，响应内容：", login_response)
+        print("学校拒绝登录。", flush=True)
         result = '验证码错误'
         send_QQ_email_plain(result)
         sys.exit(1)
     else:
-        print("登录响应：", login_response)
+        print("学校登录接口已响应。", flush=True)
 
     # 判断登录是否需要二次验证
-    if 'data' in response.json() and response.json()['data']['code'] == 'TWOVERIFY':
+    if (login_response.get('data') or {}).get('code') == 'TWOVERIFY':
+        if not os.getenv('PRINCIPAL') or not os.getenv('CREDENTIAL'):
+            raise CheckInRejected('学校要求二次验证，但未配置密保问题或答案。')
         # 需要二次验证
         vcodes = response.json()['data']['uid']
         session.headers['vcodes'] = vcodes
@@ -147,14 +167,23 @@ def login(session):
         }
         res = session.post('https://ids.gzist.edu.cn/lyuapServer/login/twoVertify', headers=session.headers,
                            json=json_data)
-        print("二次验证响应：", res.json())
+        verification = res.json()
+        if not (verification.get('meta') or {}).get('success') or not (verification.get('data') or {}).get('flag'):
+            raise CheckInRejected('学校二次验证未通过，请检查密保配置。')
+        print('二次验证通过。', flush=True)
         # 二次登陆
         response = session.post('https://ids.gzist.edu.cn/lyuapServer/v1/tickets', data=data)
-        return response.json()['ticket']
+        ticket = response.json().get('ticket')
+        if not ticket:
+            raise CheckInRejected('登录未获得 ticket，请检查学校登录或二次验证要求。')
+        return ticket
     # 登录成功
     else:
         # logging.log(logging.INFO, '登录成功')
-        return response.json()['ticket']
+        ticket = response.json().get('ticket')
+        if not ticket:
+            raise CheckInRejected('登录未获得 ticket，请检查学校登录或二次验证要求。')
+        return ticket
 
 
 def UpdateCookie(session, ticket):
@@ -162,7 +191,8 @@ def UpdateCookie(session, ticket):
     response = session.get(
         'https://xsfw.gzist.edu.cn/xsfw/sys/swmzncqapp/*default/index.do',
         params=params)
-    session.cookies = response.cookies
+    # requests.Session already retains cookies across the redirect chain.
+    session.cookies.update(response.cookies)
 
 
 def doWork(session):
@@ -200,43 +230,72 @@ def doWork(session):
             cookies=cookies,
             data=data_by,
         )
-    global result
     try:
-        result = response.json()['msg']
-        print('签到结果: ' + result)
-        return result
-    except json.JSONDecodeError as e:
-        print(f'签到异常: JSON解析错误 - {e}')
-        print(f'服务器响应内容: {response.text if response.text else "空响应"}')
-        return '查寝失败'
-    except Exception as e:
-        print(f'签到异常: {e}')
-        return '查寝失败'
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError('签到接口没有返回有效 JSON，请检查学校服务或登录状态。') from exc
+    result = payload.get('msg') if isinstance(payload, dict) else None
+    if not isinstance(result, str) or not result.strip():
+        raise RuntimeError('签到接口缺少有效结果，无法确认签到。')
+    print('签到结果: ' + result, flush=True)
+    return result
+
+
+def confirmed_success(message):
+    normalized = re.sub(r'[\s,，。!！;；]', '', message)
+    return normalized in {'成功', '签到成功', '您已签到请勿重复签到', '已签到请勿重复签到'}
+
+
+def notify(message):
+    try:
+        send_QQ_email_plain(message)
+    except Exception:
+        print('邮件通知异常，请以 Actions 日志和学校记录为准。', flush=True)
 
 
 def main():
     session = init()
-    ticket = login(session)
-    UpdateCookie(session, ticket)
-    res = doWork(session)
-    send_QQ_email_plain(res)
+    try:
+        ticket = login(session)
+        UpdateCookie(session, ticket)
+        result = doWork(session)
+        if not confirmed_success(result):
+            raise CheckInRejected(result)
+        return result
+    finally:
+        session.close()
+
+
+def run(max_attempts=5):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = main()
+        except CheckInRejected as exc:
+            message = f'查寝未完成：{exc}'
+            print(message, flush=True)
+            notify(message)
+            return 1
+        except Exception as exc:
+            if isinstance(exc, requests.ConnectTimeout):
+                detail = '连接学校服务器超时（连接限时 10 秒），尚不能确认签到。'
+            elif isinstance(exc, requests.ReadTimeout):
+                detail = '等待学校响应超时（读取限时 20 秒），请核对学校记录。'
+            else:
+                detail = f'{type(exc).__name__}，请检查学校服务及登录状态。'
+            print(f'尝试 {attempt}/{max_attempts} 失败：{detail}', flush=True)
+            _dns_cache.clear()
+            if attempt == max_attempts:
+                notify(f'连续{max_attempts}次执行失败！{detail} 请手动查寝！')
+                return 1
+            wait = min(5 * (2 ** (attempt - 1)), 30) + random.uniform(0, 3)
+            print(f'等待 {wait:.1f} 秒后重试...', flush=True)
+            time.sleep(wait)
+        else:
+            notify('成功：' + result)
+            print('已确认签到成功或已有签到记录。', flush=True)
+            return 0
+    return 1
 
 
 if __name__ == '__main__':
-    max_attempts = 5
-    attempt = 0
-    while attempt < max_attempts:
-        try:
-            main()
-            print("执行成功！")
-            break
-        except Exception as e:
-            attempt += 1
-            print(f"尝试 {attempt} 次失败，错误信息：{e}")
-            if attempt == max_attempts:
-                send_QQ_email_plain(f'连续' + str(max_attempts) + '次执行失败！请手动查寝！')
-                print("已达最大尝试次数，程序结束。")
-            else:
-                wait = min(5 * (2 ** (attempt - 1)), 60) + random.uniform(0, 3)
-                print(f"等待 {wait:.1f} 秒后重试...")
-                time.sleep(wait)
+    sys.exit(run())
