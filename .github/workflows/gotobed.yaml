@@ -8,7 +8,13 @@ name: gotobed
 #    - cron: '50 10 * * *' # 10对应的是北京时间晚上六点 50是分钟 表示每天晚上六点五十执行，可以改成任意时间测试
 
 on:
- workflow_dispatch:  # 允许手动触发
+ workflow_dispatch:
+  inputs:
+   diagnostics_only:
+    description: '仅诊断学校网络，不登录、不签到、不发邮件'
+    required: false
+    default: false
+    type: boolean
  schedule: # 每天北京时间 21:40（UTC 13:40）
  - cron: '40 13 * * *'
 
@@ -16,6 +22,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v2
       - name: Set up Python 3.11
@@ -23,12 +30,42 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Diagnose school connectivity
+        if: ${{ inputs.diagnostics_only }}
+        run: |
+          echo "IPv6 default route:"
+          ip -6 route show default
+          for host in ids.gzist.edu.cn xsfw.gzist.edu.cn; do
+            echo "=== $host: system DNS ==="
+            getent ahosts "$host" || true
+            for resolver in 223.5.5.5 119.29.29.29; do
+              echo "=== $host via $resolver ==="
+              dig +time=2 +tries=1 +short @"$resolver" "$host" A || true
+              dig +time=2 +tries=1 +short @"$resolver" "$host" AAAA || true
+            done
+            if [ "$host" = "ids.gzist.edu.cn" ]; then
+              url="https://$host/lyuapServer/login"
+            else
+              url="https://$host/"
+            fi
+            for family in auto ipv4 ipv6; do
+              args=()
+              if [ "$family" = "ipv4" ]; then args=(-4); fi
+              if [ "$family" = "ipv6" ]; then args=(-6); fi
+              echo "=== HTTPS $family $host ==="
+              curl "${args[@]}" --noproxy '*' --connect-timeout 5 --max-time 12 --silent --show-error --output /dev/null --write-out 'http=%{http_code} remote=%{remote_ip} connect=%{time_connect} total=%{time_total}\n' "$url" || true
+            done
+          done
+          echo "诊断已完成；此任务未登录、未签到、未发邮件。" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install dependencies
+        if: ${{ !inputs.diagnostics_only }}
         run: |
           python -m pip install --upgrade pip
           pip install Pyexecjs requests pytz ddddocr dnspython
 
       - name: Run python script
+        if: ${{ !inputs.diagnostics_only }}
         env:
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
@@ -48,3 +85,4 @@ jobs:
           fi
           python -u gzlg助手/goToBed.py || { code=$?; echo "Script failed with exit code $code"; exit "$code"; }
         
+
